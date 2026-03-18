@@ -415,14 +415,99 @@ There are two ways to let Koyeb read the configuration file, choose one of them:
 
 Then click the Deploy button.
 
-## Ubuntu deployment
+## Debian/Ubuntu Deployment & Autostart
 
-In the warehouse Releases, find the latest version of the corresponding binary file, for example, a file named uni-api-linux-x86_64-0.0.99.pex. Download the binary file on the server and run it:
+It is recommended to run from source code. Here is the complete process to configure uni-api as a background system service:
 
+### Step 1: Prepare the Runtime Environment
+
+**Method 1: Use uv (Recommended)**
+
+`uv` is the officially recommended, extremely fast Python package and environment manager. Just pull the code and run; it will automatically read `uv.lock` and set up the environment:
 ```bash
-wget https://github.com/yym68686/uni-api/releases/download/v0.0.99/uni-api-linux-x86_64-0.0.99.pex
-chmod +x uni-api-linux-x86_64-0.0.99.pex
-./uni-api-linux-x86_64-0.0.99.pex
+git clone https://github.com/yym68686/uni-api.git
+cd uni-api
+# git submodule update --init --recursive
+uv run python main.py
+# If you need to use a remote configuration file, you can specify the environment variable like this:
+# CONFIG_URL="http://your-file-url/api.yaml" uv run python main.py
+```
+
+**Method 2: Use Native Python venv**
+
+If you prefer not to use third-party tools, you can use the native venv virtual environment:
+```bash
+git clone https://github.com/yym68686/uni-api.git
+cd uni-api
+# git submodule update --init --recursive
+python3 -m venv venv
+source venv/bin/activate
+pip install -e .
+python main.py
+# If you need to use a remote configuration file, you can specify the environment variable like this:
+# CONFIG_URL="http://your-file-url/api.yaml" python main.py
+```
+
+### Step 2: Configure systemd Autostart Service
+
+To keep uni-api running stably in the background and start automatically on boot, we can configure a `systemd` service. Using **Method 1 (uv)** as an example:
+
+1. Find the absolute path to your uv command:
+```bash
+which uv
+```
+*(Assuming the output is `/root/.cargo/bin/uv`)*
+
+2. Create the systemd service configuration file:
+```bash
+sudo nano /etc/systemd/system/uni-api.service
+```
+
+3. Fill in the following content (**Be sure to replace paths and user with your actual server configuration**):
+```ini
+[Unit]
+Description=Uni API Gateway Service
+After=network.target
+
+[Service]
+# Recommended to run as a non-root user (e.g., ubuntu or debian)
+User=root
+Group=root
+
+# Absolute path to the project code
+WorkingDirectory=/opt/uni-api
+
+# Start command: Ensure you use the absolute path for uv!
+ExecStart=/root/.cargo/bin/uv run python /opt/uni-api/main.py
+
+# Environment variables: Ensure the service can find commands like uv
+Environment="PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Environment="CONFIG_URL=http://your-file-url/api.yaml"
+
+# Auto-restart policy
+Restart=always
+RestartSec=5
+
+# Output logs to syslog
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=uni-api
+
+[Install]
+WantedBy=multi-user.target
+```
+
+4. Reload the configuration and set to start on boot:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start uni-api
+sudo systemctl enable uni-api
+```
+
+View real-time background logs:
+```bash
+sudo journalctl -u uni-api -f
 ```
 
 ## Serv00 Remote Deployment (FreeBSD 14.0)

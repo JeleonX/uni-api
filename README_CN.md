@@ -417,14 +417,100 @@ curl -X GET 'https://xxx.xxx/v1/search?q=Jina%2BAI' \
 
 最后点击 Deploy 部署按钮。
 
-## Ubuntu 部署
+## Debian/Ubuntu 部署与开机启动
 
-在仓库 Releases 找到对应的二进制文件最新版本，例如名为 uni-api-linux-x86_64-0.0.99.pex 的文件。在服务器下载二进制文件并运行：
+推荐使用源码运行方式。以下是将 uni-api 配置为系统后台服务的完整流程：
 
+### 第一步：准备运行环境
+
+**方法一：使用 uv（推荐）**
+
+`uv` 是目前官方推荐的极速 Python 包和环境管理器。只需拉取代码并运行，它会自动读取 `uv.lock` 并准备好环境：
 ```bash
-wget https://github.com/yym68686/uni-api/releases/download/v0.0.99/uni-api-linux-x86_64-0.0.99.pex
-chmod +x uni-api-linux-x86_64-0.0.99.pex
-./uni-api-linux-x86_64-0.0.99.pex
+git clone https://github.com/yym68686/uni-api.git
+cd uni-api
+# git submodule update --init --recursive
+uv run python main.py
+# 如果需要使用远程配置文件，可以这样指定环境变量：
+# CONFIG_URL="http://your-file-url/api.yaml" uv run python main.py
+```
+
+**方法二：使用原生 Python venv**
+
+如果不使用第三方工具，可以使用原生 venv 虚拟环境：
+```bash
+git clone https://github.com/yym68686/uni-api.git
+cd uni-api
+# git submodule update --init --recursive
+python3 -m venv venv
+source venv/bin/activate
+pip install -e .
+python main.py
+# 如果需要使用远程配置文件，可以这样指定环境变量：
+# CONFIG_URL="http://your-file-url/api.yaml" python main.py
+```
+
+### 第二步：配置 systemd 开机启动服务
+
+为了让 uni-api 在后台稳定运行并开机自启，我们可以配置 `systemd` 服务。以 **方法一（uv）** 为例：
+
+1. 查找你的 uv 命令绝对路径：
+```bash
+which uv
+```
+*(假设输出为 `/root/.cargo/bin/uv`)*
+
+2. 创建 systemd 服务配置文件：
+```bash
+sudo nano /etc/systemd/system/uni-api.service
+```
+
+3. 填入以下内容（**请务必将路径和用户替换为你服务器上的实际路径**）：
+```ini
+[Unit]
+Description=Uni API Gateway Service
+After=network.target
+
+[Service]
+# 建议配置为运行代码的非 root 用户，例如 ubuntu 或 debian
+User=root
+Group=root
+
+# 项目代码所在的绝对路径
+WorkingDirectory=/opt/uni-api
+
+# 启动命令：必须使用 uv 命令的绝对路径！
+ExecStart=/root/.cargo/bin/uv run python /opt/uni-api/main.py
+
+# 环境变量：确保服务能找到 uv 等命令
+Environment="PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# 如果你像文档中一样使用 CONFIG_URL 获取配置文件，可以加上这行（可选）
+# Environment="CONFIG_URL=http://your-file-url/api.yaml"
+
+# 自动重启策略
+Restart=always
+RestartSec=5
+
+# 将日志输出至 syslog
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=uni-api
+
+[Install]
+WantedBy=multi-user.target
+```
+
+4. 重载设定并设为开机启动：
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start uni-api
+sudo systemctl enable uni-api
+```
+
+查看程序的实时后台运行日志：
+```bash
+sudo journalctl -u uni-api -f
 ```
 
 ## serv00 远程部署（FreeBSD 14.0）
