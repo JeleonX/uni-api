@@ -80,9 +80,11 @@ def normalize_search_response(url: str, response_json: object) -> dict:
                 meta[k] = v
 
         return {
+            "query": response_json.get("query"),  # Ensure query exists on root
             "code": 200,
             "status": 20000,
             "data": data,
+            "results": data,  # Added to support Cherry Studio / Tavily-native clients
             "meta": meta,
         }
 

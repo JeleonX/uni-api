@@ -681,9 +681,26 @@ async def get_api_key(request: Request):
     if request.headers.get("x-api-key"):
         token = request.headers.get("x-api-key")
     elif request.headers.get("Authorization"):
-        api_split_list = request.headers.get("Authorization").split(" ")
-        if len(api_split_list) > 1:
-            token = api_split_list[1]
+        auth_header = request.headers.get("Authorization").strip()
+        if auth_header.lower().startswith("bearer "):
+            api_split_list = auth_header.split(" ", 1)
+            if len(api_split_list) > 1:
+                token = api_split_list[1]
+        else:
+            # Fallback for clients sending the token directly without 'Bearer '
+            token = auth_header
+            
+    # Fallback to search payload body extraction (e.g. Cherry Studio Tavily endpoint)
+    if not token and request.method == "POST" and "application/json" in request.headers.get("content-type", ""):
+        try:
+            body_bytes = await request.body()
+            if body_bytes:
+                body_json = await asyncio.to_thread(json.loads, body_bytes.decode('utf-8'))
+                if isinstance(body_json, dict) and body_json.get("api_key"):
+                    token = body_json.get("api_key")
+        except Exception:
+            pass
+            
     return token
 
 def get_client_ip(request: Request) -> str:
@@ -741,6 +758,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
         # 根据token决定是否启用道德审查
         token = await get_api_key(request)
         if not token:
+            logger.error(f"[DEBUG-AUTH] No token found in request headers for IP {get_client_ip(request)}. Headers: {request.headers}")
             return JSONResponse(
                 status_code=403,
                 content={"error": "Invalid or missing API Key"}
@@ -756,6 +774,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
             # 如果 token 不在 api_list 中，检查是否以 api_list 中的任何一个开头
             # api_index = next((i for i, api in enumerate(api_list) if token.startswith(api)), None)
             api_index = None
+            logger.error(f"[DEBUG-AUTH] Token '{token}' not found in api_list. Available APIs: {api_list}")
             # token不在api_list中，使用默认值（不开启）
 
         if api_index is not None:
@@ -772,6 +791,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                         content={"error": "Balance is insufficient, please check your account."}
                     )
         else:
+            logger.error(f"[DEBUG-AUTH] Returning 403 because api_index is None for token: '{token}'")
             return JSONResponse(
                 status_code=403,
                 content={"error": "Invalid or missing API Key"}
@@ -810,7 +830,8 @@ class StatsMiddleware(BaseHTTPMiddleware):
                 disconnect_event = asyncio.Event()
                 current_info["disconnect_event"] = disconnect_event
                 disconnect_task = asyncio.create_task(monitor_disconnect(request, disconnect_event))
-            if parsed_body and not request.url.path.startswith("/v1/api_config"):
+            # NOTE: /v1/search 和 /search 的 POST body 格式与 UnifiedRequest 不兼容，需要跳过解析
+            if parsed_body and not request.url.path.startswith("/v1/api_config") and request.url.path not in ("/search", "/v1/search"):
                 request_model = await asyncio.to_thread(UnifiedRequest.model_validate, parsed_body)
                 request_model = request_model.data
                 if is_debug:
@@ -1323,7 +1344,8 @@ async def process_request(request: Union[RequestModel, ImageGenerationRequest, A
         has_audio_modality = any(str(m).lower() == "audio" for m in (getattr(request, "modalities", None) or []))
     except Exception:
         has_audio_modality = False
-    if engine in ["gemini", "vertex-gemini"] and (has_audio_modality or "preview-tts" in original_model.lower()):
+    if engine in ["gemini", "vertex-gemini"] and (has_audio_modality or "preview-tts" in original_model.lower()) \
+        or engine == "search":
         request.stream = False
 
     channel_id = f"{provider['provider']}"
@@ -2433,32 +2455,30 @@ class ResponsesRequestHandler:
 model_handler = ModelRequestHandler()
 responses_handler = ResponsesRequestHandler()
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
-async def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def verify_api_key(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)):
     api_list = app.state.api_list
-    token = credentials.credentials
+    token = credentials.credentials if credentials and credentials.credentials else await get_api_key(request)
     api_index = None
-    try:
-        api_index = api_list.index(token)
-    except ValueError:
-        # 如果 token 不在 api_list 中，检查是否以 api_list 中的任何一个开头
-        # api_index = next((i for i, api in enumerate(api_list) if token.startswith(api)), None)
-        api_index = None
+    if token:
+        try:
+            api_index = api_list.index(token)
+        except ValueError:
+            api_index = None
     if api_index is None:
         raise HTTPException(status_code=403, detail="Invalid or missing API Key")
     return api_index
 
-async def verify_admin_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def verify_admin_api_key(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)):
     api_list = app.state.api_list
-    token = credentials.credentials
+    token = credentials.credentials if credentials and credentials.credentials else await get_api_key(request)
     api_index = None
-    try:
-        api_index = api_list.index(token)
-    except ValueError:
-        # 如果 token 不在 api_list 中，检查是否以 api_list 中的任何一个开头
-        # api_index = next((i for i, api in enumerate(api_list) if token.startswith(api)), None)
-        api_index = None
+    if token:
+        try:
+            api_index = api_list.index(token)
+        except ValueError:
+            api_index = None
     if api_index is None:
         raise HTTPException(status_code=403, detail="Invalid or missing API Key")
     # for api_key in app.state.api_keys_db:
@@ -2487,6 +2507,29 @@ async def jina_search(
     search_request = RequestModel(
         model="search",
         messages=[{"role": "user", "content": q}],
+        stream=False,
+    )
+    return await model_handler.request_model(search_request, api_index, background_tasks, endpoint=str(request.url.path))
+
+# NOTE: POST 搜索请求体模型，兼容 Tavily 风格的请求格式
+class SearchRequest(BaseModel):
+    query: str  # Tavily 风格，使用 query 字段
+
+@app.post("/search", dependencies=[Depends(rate_limit_dependency)])
+@app.post("/v1/search", dependencies=[Depends(rate_limit_dependency)])
+async def jina_search_post(
+    request: Request,
+    search_request_body: SearchRequest,
+    background_tasks: BackgroundTasks,
+    api_index: int = Depends(verify_api_key),
+):
+    """
+    POST 版本的搜索接口，通过 JSON body 传递搜索关键词。
+    请求体格式: {"query": "搜索内容"}
+    """
+    search_request = RequestModel(
+        model="search",
+        messages=[{"role": "user", "content": search_request_body.query}],
         stream=False,
     )
     return await model_handler.request_model(search_request, api_index, background_tasks, endpoint=str(request.url.path))
